@@ -1,0 +1,17 @@
+# Exclude local env & caches
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+
+# Exclude non-API assets from serverless build context
+simul.py
+요금제시뮬레이터.xlsx
+
+# OS/other
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Vercel local
+.vercel/
