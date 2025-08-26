@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Literal, List
 
@@ -114,9 +115,85 @@ class CalculateRequest(BaseModel):
     price_basis: Literal["min", "avg", "max"] = "avg"
 
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
+def home():
+    # 한국어 주석: 간단한 웹 UI 제공 (스트림릿 대체용 최소 페이지)
+    return """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset='utf-8' />
+      <meta name='viewport' content='width=device-width, initial-scale=1' />
+      <title>AI Cost Simulator (API UI)</title>
+      <style>
+        body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; }
+        h1 { margin-bottom: 8px; }
+        .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 12px 0; }
+        label { display:block; margin: 8px 0 4px; font-weight: 600; }
+        input, select, textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+        button { padding: 10px 16px; border-radius: 6px; border: none; background: #4f46e5; color: #fff; cursor: pointer; }
+        pre { background: #0b1020; color: #c7e1ff; padding: 12px; border-radius: 8px; overflow: auto; }
+      </style>
+    </head>
+    <body>
+      <h1>AI Cost Simulator</h1>
+      <p>이 페이지는 서버리스 API를 사용해 간단히 계산을 실행합니다. 전체 대시보드는 Streamlit에서 실행하세요.</p>
+      <div class="card">
+        <label>Monthly Usage</label>
+        <input id="monthly_usage" type="number" value="1000" min="0" />
+        <label>Price Basis</label>
+        <select id="price_basis">
+          <option value="avg" selected>avg</option>
+          <option value="min">min</option>
+          <option value="max">max</option>
+        </select>
+        <label>Model Split (JSON)</label>
+        <textarea id="model_split" rows="8">{
+  "Claude Opus 4.1": 10,
+  "Claude Sonnet 4": 40,
+  "OpenAI GPT-5": 20,
+  "OpenAI GPT-4.1/o3": 15,
+  "OpenAI 2.5 Pro": 10,
+  "Gemini 2.5 Flash": 5
+}</textarea>
+        <div style="display:flex; gap:8px; margin-top:12px;">
+          <button id="run">Run Calculate</button>
+          <button id="pricing">Get Pricing</button>
+          <a href="/health" target="_blank" style="margin-left:auto;">Health</a>
+        </div>
+      </div>
+      <div class="card">
+        <pre id="out">결과가 여기에 표시됩니다...</pre>
+      </div>
+      <script>
+        const el = (id) => document.getElementById(id);
+        const show = (data) => el('out').textContent = JSON.stringify(data, null, 2);
+        document.getElementById('pricing').onclick = async () => {
+          const res = await fetch('/pricing');
+          show(await res.json());
+        };
+        document.getElementById('run').onclick = async () => {
+          let split = {};
+          try { split = JSON.parse(el('model_split').value); } catch (e) { show({ error: 'model_split JSON 파싱 오류' }); return; }
+          const body = {
+            monthly_usage: Number(el('monthly_usage').value),
+            model_split: split,
+            input_multiplier: 1.0,
+            output_multiplier: 1.0,
+            price_basis: el('price_basis').value
+          };
+          const res = await fetch('/calculate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          show(await res.json());
+        };
+      </script>
+    </body>
+    </html>
+    """
+
+
+@app.get("/health", response_class=JSONResponse)
 def health():
-    # 한국어 주석: 상태 확인 엔드포인트
+    # 한국어 주석: 상태 확인 엔드포인트 (JSON)
     return {"status": "ok", "models": list(PRICING_DATA.keys())}
 
 
