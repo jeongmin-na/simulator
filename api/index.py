@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
-from typing import Dict, Literal
-import pandas as pd
+from typing import Dict, Literal, List
 
 # 한국어 주석: Vercel 서버리스에서 동작할 최소 FastAPI 래퍼
 
@@ -70,8 +69,8 @@ def calculate_costs(
     output_multiplier: float = 1.0,
     price_basis: Literal["min", "avg", "max"] = "avg",
 ):
-    # 한국어 주석: 핵심 비용 계산 로직 (Streamlit 미사용)
-    results = []
+    # 한국어 주석: 핵심 비용 계산 로직 (순수 Python 리스트/딕셔너리)
+    results: List[Dict] = []
     for model, config in pricing_data.items():
         if model in model_split:
             usage_share = monthly_usage * (model_split[model] / 100.0)
@@ -94,12 +93,16 @@ def calculate_costs(
                 "cost_ratio": 0,
             })
 
-    df = pd.DataFrame(results)
-    if not df.empty:
-        total_cost_sum = df["total_cost"].sum()
-        df["cost_ratio"] = (df["total_cost"] / total_cost_sum * 100).round(1)
+    # 한국어 주석: 비율 재계산
+    total_cost_sum = sum(item["total_cost"] for item in results)
+    if total_cost_sum > 0:
+        for item in results:
+            item["cost_ratio"] = round(item["total_cost"] / total_cost_sum * 100, 1)
 
-    return df
+    return {
+        "results": results,
+        "total_cost": float(total_cost_sum),
+    }
 
 
 # ------------------ 스키마 ------------------
@@ -131,7 +134,7 @@ def post_calculate(req: CalculateRequest):
     if abs(total_percent - 100.0) > 0.01:
         return {"error": f"model_split 합계는 100이어야 합니다. 현재: {total_percent}"}
 
-    df = calculate_costs(
+    calc = calculate_costs(
         monthly_usage=req.monthly_usage,
         model_split=req.model_split,
         pricing_data=PRICING_DATA,
@@ -140,11 +143,5 @@ def post_calculate(req: CalculateRequest):
         price_basis=req.price_basis,
     )
 
-    if df.empty:
-        return {"results": [], "total_cost": 0.0}
-
-    return {
-        "results": df.to_dict(orient="records"),
-        "total_cost": float(df["total_cost"].sum()),
-    }
+    return calc
 
