@@ -86,6 +86,16 @@ def load_pricing_data():
 
 pricing_data = load_pricing_data()
 
+# ------------------ 비용 상수 ------------------
+# 월 기본요금과 포함 요청 수, 수수료 (백만 토큰당 $0.25)
+BASE_MONTHLY_FEE = 60.0
+INCLUDED_REQUESTS = {
+    "Claude Sonnet 4": 225,
+    "OpenAI GPT-5": 500,
+    "Gemini 2.5 Flash": 550,
+}
+SURCHARGE_PER_MTOKEN = 0.25
+
 def get_price_by_basis(config: dict, basis: str) -> tuple:
     """가격 기준에 따른 1k당 입력/출력 단가를 반환합니다.
     basis: 'min' | 'avg' | 'max'"""
@@ -99,26 +109,56 @@ def get_price_by_basis(config: dict, basis: str) -> tuple:
     return input_price, output_price
 
 # ------------------ 계산 함수 ------------------
-def calculate_costs(monthly_usage, model_split, pricing_data, input_multiplier=1.0, output_multiplier=1.0, price_basis: str = 'avg'):
+def calculate_costs(
+    monthly_usage,
+    model_split,
+    pricing_data,
+    input_multiplier=1.0,
+    output_multiplier=1.0,
+    price_basis: str = 'avg',
+    avg_tokens_override: dict | None = None,
+    included_requests: dict | None = None,
+    surcharge_per_mtoken: float = 0.0
+):
     results = []
     for model, config in pricing_data.items():
         if model in model_split:
-            usage_share = monthly_usage * (model_split[model] / 100.0)
-            input_tokens = usage_share * config["avg_input"] * input_multiplier
-            output_tokens = usage_share * config["avg_output"] * output_multiplier
+            usage_share = int(monthly_usage * (model_split[model] / 100.0))
+
+            # 포함 요청 처리 (무료 구간)
+            included = (included_requests or {}).get(model, 0)
+            free_requests = min(usage_share, included)
+            billable_requests = max(0, usage_share - included)
+
+            # 평균 토큰 오버라이드
+            if avg_tokens_override and model in avg_tokens_override:
+                avg_input = avg_tokens_override[model]["avg_input"]
+                avg_output = avg_tokens_override[model]["avg_output"]
+            else:
+                avg_input = config["avg_input"]
+                avg_output = config["avg_output"]
+
+            # 청구 대상 요청에 대해서만 토큰 계산
+            input_tokens = billable_requests * avg_input * input_multiplier
+            output_tokens = billable_requests * avg_output * output_multiplier
             price_in, price_out = get_price_by_basis(config, price_basis)
             
             input_cost = (input_tokens / 1000) * price_in
             output_cost = (output_tokens / 1000) * price_out
-            total_cost = input_cost + output_cost
+            # 커서 수수료: (입력+출력) 총 토큰 기준, $/1M tokens
+            surcharge_fee = ((input_tokens + output_tokens) / 1_000_000) * (surcharge_per_mtoken or 0.0)
+            total_cost = input_cost + output_cost + surcharge_fee
             
             results.append({
                 "모델": model,
                 "사용량": int(usage_share),
+                "무료 포함 요청": int(free_requests),
+                "청구 요청": int(billable_requests),
                 "Input Tokens": int(input_tokens),
                 "Output Tokens": int(output_tokens),
                 "Input 비용($)": round(input_cost, 4),
                 "Output 비용($)": round(output_cost, 4),
+                "수수료($)": round(surcharge_fee, 4),
                 "총 비용($)": round(total_cost, 4),
                 "비용 비율(%)": 0  # 나중에 계산
             })
@@ -198,9 +238,37 @@ if total_percent != 100:
 else:
     st.success("✅ 비율 합계: 100%")
 
+# ------------------ 평균 토큰 사용자 입력 ------------------
+st.markdown("### 🧮 모델별 평균 토큰(요청당)")
+avg_tokens_override = {}
+with st.expander("평균 토큰 직접 입력", expanded=False):
+    for model, cfg in pricing_data.items():
+        c1, c2 = st.columns(2)
+        with c1:
+            avg_in = st.number_input(
+                f"{model} 평균 Input tokens", min_value=1, max_value=20000,
+                value=int(cfg["avg_input"]), step=50, key=f"avg_in_{model}"
+            )
+        with c2:
+            avg_out = st.number_input(
+                f"{model} 평균 Output tokens", min_value=1, max_value=20000,
+                value=int(cfg["avg_output"]), step=50, key=f"avg_out_{model}"
+            )
+        avg_tokens_override[model] = {"avg_input": avg_in, "avg_output": avg_out}
+
 # ------------------ 메인 콘텐츠 ------------------
 # 기본 계산 (우측 컨트롤 패널 값을 사용)
-results_df = calculate_costs(monthly_usage, model_split, pricing_data, input_multiplier, output_multiplier, price_basis)
+results_df = calculate_costs(
+    monthly_usage,
+    model_split,
+    pricing_data,
+    input_multiplier,
+    output_multiplier,
+    price_basis,
+    avg_tokens_override=avg_tokens_override,
+    included_requests=INCLUDED_REQUESTS,
+    surcharge_per_mtoken=SURCHARGE_PER_MTOKEN
+)
 
 # 탭 구성
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 기본 분석", "📈 시각화 대시보드", "⚖️ 모델 비교", "📅 시간별 분석", "💡 최적화 제안"])
@@ -212,7 +280,8 @@ with tab1:
     # 주요 지표 표시
     col1, col2, col3, col4 = st.columns(4)
     
-    total_cost = results_df["총 비용($)"].sum()
+    surcharge_total = results_df["수수료($)"].sum() if "수수료($)" in results_df.columns else 0.0
+    total_cost = results_df["총 비용($)"].sum() + BASE_MONTHLY_FEE
     total_requests = results_df["사용량"].sum()
     cost_per_request = total_cost / total_requests if total_requests > 0 else 0
     most_expensive_model = results_df.loc[results_df["총 비용($)"].idxmax(), "모델"] if not results_df.empty else "N/A"
@@ -225,6 +294,13 @@ with tab1:
         st.metric("📊 요청당 평균 비용", f"${cost_per_request:.4f}")
     with col4:
         st.metric("🏆 최고 비용 모델", most_expensive_model)
+
+    # 기본요금 및 수수료 별도 지표
+    col5, col6 = st.columns(2)
+    with col5:
+        st.metric("📦 기본요금", f"${BASE_MONTHLY_FEE:.2f}")
+    with col6:
+        st.metric("💸 수수료 합계", f"${surcharge_total:.2f}")
     
     # 상세 테이블
     st.subheader("📋 모델별 상세 분석")
@@ -366,7 +442,13 @@ with tab2:
             trend_data = []
             
             for usage in usage_range:
-                temp_df = calculate_costs(usage, model_split, pricing_data, input_multiplier, output_multiplier)
+                temp_df = calculate_costs(
+                    usage, model_split, pricing_data,
+                    input_multiplier, output_multiplier, price_basis,
+                    avg_tokens_override=avg_tokens_override,
+                    included_requests=INCLUDED_REQUESTS,
+                    surcharge_per_mtoken=SURCHARGE_PER_MTOKEN
+                )
                 for _, row in temp_df.iterrows():
                     trend_data.append({
                         'Usage': usage,
@@ -654,7 +736,13 @@ with tab5:
             
             # 2. 토큰 길이 최적화
             if input_multiplier > 1.0 or output_multiplier > 1.0:
-                optimized_cost = calculate_costs(monthly_usage, model_split, pricing_data, 0.8, 0.8)['총 비용($)'].sum()
+                optimized_cost = calculate_costs(
+                    monthly_usage, model_split, pricing_data,
+                    0.8, 0.8, price_basis,
+                    avg_tokens_override=avg_tokens_override,
+                    included_requests=INCLUDED_REQUESTS,
+                    surcharge_per_mtoken=SURCHARGE_PER_MTOKEN
+                )['총 비용($)'].sum() + BASE_MONTHLY_FEE
                 savings2 = total_cost - optimized_cost
                 potential_savings.append(("토큰 최적화", savings2))
             
@@ -673,7 +761,13 @@ with tab5:
             total_optimized = sum(optimized_split.values())
             if total_optimized > 0:
                 optimized_split = {k: (v / total_optimized) * 100 for k, v in optimized_split.items()}
-                optimized_cost = calculate_costs(monthly_usage, optimized_split, pricing_data, input_multiplier, output_multiplier)['총 비용($)'].sum()
+                optimized_cost = calculate_costs(
+                    monthly_usage, optimized_split, pricing_data,
+                    input_multiplier, output_multiplier, price_basis,
+                    avg_tokens_override=avg_tokens_override,
+                    included_requests=INCLUDED_REQUESTS,
+                    surcharge_per_mtoken=SURCHARGE_PER_MTOKEN
+                )['총 비용($)'].sum() + BASE_MONTHLY_FEE
                 savings3 = total_cost - optimized_cost
                 potential_savings.append(("사용량 재분배", savings3))
             
@@ -704,9 +798,13 @@ with tab5:
                 normalized_split, 
                 pricing_data, 
                 params["input_mult"], 
-                params["output_mult"]
+                params["output_mult"],
+                price_basis,
+                avg_tokens_override=avg_tokens_override,
+                included_requests=INCLUDED_REQUESTS,
+                surcharge_per_mtoken=SURCHARGE_PER_MTOKEN
             )
-            total_scenario_cost = scenario_df["총 비용($)"].sum()
+            total_scenario_cost = scenario_df["총 비용($)"].sum() + BASE_MONTHLY_FEE
             
             scenario_results.append({
                 "시나리오": scenario_name,
